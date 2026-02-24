@@ -10,7 +10,8 @@ import json
 from datetime import datetime
 from typing import List, Dict, Set
 import logging
-from apscheduler.schedulers.asyncio import AsyncIOScheduler
+# apscheduler は Python 3.14 非対応のため、後で実装
+# from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from langchain.llms import Ollama
 import chromadb
 from chromadb.config import Settings
@@ -92,8 +93,8 @@ try:
 except:
     collection = chroma_client.create_collection(name="user_knowledge")
 
-# スケジューラー
-scheduler = AsyncIOScheduler()
+# スケジューラー（Python 3.14 非対応のため後で実装）
+# scheduler = AsyncIOScheduler()
 
 # ────────────────────────────────────────
 # WebSocket エンドポイント
@@ -312,15 +313,15 @@ def setup_scheduler():
 async def startup_event():
     """アプリケーション起動時の処理"""
     logger.info("サーバー起動...")
-    setup_scheduler()
-    scheduler.start()
-    logger.info("トリガーエンジン起動")
+    # スケジューラーは Python 3.14 非対応のため後で実装
+    # setup_scheduler()
+    # scheduler.start()
 
 @app.on_event("shutdown")
 async def shutdown_event():
     """アプリケーション終了時の処理"""
     logger.info("サーバー停止...")
-    scheduler.shutdown()
+    # scheduler.shutdown()
 
 # ────────────────────────────────────────
 # ヘルスチェック
