@@ -1,29 +1,20 @@
 """
-FastAPI バックエンドサーバー
-WebSocket + トリガーエンジン
+FastAPI バックエンドサーバー - シンプル版
+Python 3.14 対応（langchain・apscheduler なし）
 """
 
-from fastapi import FastAPI, WebSocket, HTTPException
+from fastapi import FastAPI, WebSocket
 from fastapi.middleware.cors import CORSMiddleware
 import asyncio
 import json
 from datetime import datetime
-from typing import List, Dict, Set
+from typing import Set
 import logging
-# apscheduler は Python 3.14 非対応のため、後で実装
-# from apscheduler.schedulers.asyncio import AsyncIOScheduler
-from langchain.llms import Ollama
-import chromadb
-from chromadb.config import Settings
-import os
-from dotenv import load_dotenv
+import subprocess
 
 # ロギング設定
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
-
-# 環境変数読み込み
-load_dotenv()
 
 # FastAPI アプリ初期化
 app = FastAPI(title="Personal AI Partner API")
@@ -62,12 +53,10 @@ class ConnectionManager:
         for connection in self.active_connections:
             try:
                 await connection.send_json(message)
-                logger.info(f"メッセージ送信: {message['type']}")
             except Exception as e:
                 logger.error(f"送信失敗: {e}")
                 disconnected.append(connection)
         
-        # 切断されたクライアントを削除
         for connection in disconnected:
             self.disconnect(connection)
     
@@ -81,47 +70,65 @@ class ConnectionManager:
 
 manager = ConnectionManager()
 
-# LLM + DB 初期化
-llm = Ollama(model="mistral")
-chroma_client = chromadb.Client(Settings(
-    chroma_db_impl="duckdb+parquet",
-    persist_directory="./chroma_data"
-))
-
-try:
-    collection = chroma_client.get_collection(name="user_knowledge")
-except:
-    collection = chroma_client.create_collection(name="user_knowledge")
-
-# スケジューラー（Python 3.14 非対応のため後で実装）
-# scheduler = AsyncIOScheduler()
-
 # ────────────────────────────────────────
-# WebSocket エンドポイント
+# Ollama インタフェース
 # ────────────────────────────────────────
 
-@app.websocket("/ws")
-async def websocket_endpoint(websocket: WebSocket):
-    """WebSocket エンドポイント"""
-    await manager.connect(websocket)
-    
+def call_ollama(prompt: str) -> str:
+    """Ollama を直接呼び出して応答を生成"""
     try:
-        while True:
-            # クライアントからのメッセージ受信
-            data = await websocket.receive_text()
-            message = json.loads(data)
-            logger.info(f"受信: {message}")
-            
-            # メッセージ処理
-            response = await process_user_message(message)
-            
-            # クライアントに返答
-            await manager.send_to_specific(websocket, response)
+        # ollama cli で Mistral を呼び出す
+        result = subprocess.run(
+            ['ollama', 'run', 'mistral', prompt],
+            capture_output=True,
+            text=True,
+            timeout=30
+        )
+        
+        if result.returncode == 0:
+            return result.stdout.strip()
+        else:
+            logger.error(f"Ollama エラー: {result.stderr}")
+            return "申し訳ありません。AI エンジンに問題が発生しました。"
     
+    except subprocess.TimeoutExpired:
+        return "申し訳ありません。応答がタイムアウトしました。"
     except Exception as e:
-        logger.error(f"WebSocket エラー: {e}")
-    finally:
-        manager.disconnect(websocket)
+        logger.error(f"Ollama 呼び出しエラー: {e}")
+        return f"エラーが発生しました: {str(e)}"
+
+# ────────────────────────────────────────
+# ナレッジベース（JSON ファイルベース）
+# ────────────────────────────────────────
+
+def search_knowledge_base(query: str, max_results: int = 3) -> str:
+    """簡単なキーワード検索"""
+    try:
+        with open('./data/backup.json', 'r', encoding='utf-8') as f:
+            knowledge = json.load(f)
+    except Exception as e:
+        logger.error(f"ナレッジベース読み込みエラー: {e}")
+        return ""
+    
+    if not knowledge.get('documents'):
+        return ""
+    
+    # キーワードマッチングで検索
+    results = []
+    for doc in knowledge['documents']:
+        # クエリに含まれるキーワードが doc に含まれるか確認
+        keywords = query.split()
+        match_count = sum(1 for kw in keywords if kw in doc)
+        
+        if match_count > 0:
+            results.append((match_count, doc))
+    
+    # マッチ度でソート
+    results.sort(reverse=True)
+    
+    # 上位の結果を返す
+    context = "\n".join([doc for _, doc in results[:max_results]])
+    return context
 
 # ────────────────────────────────────────
 # メッセージ処理
@@ -149,15 +156,7 @@ async def process_user_message(message: dict) -> dict:
         'message': 'データ検索中...'
     })
     
-    try:
-        results = collection.query(
-            query_texts=[user_input],
-            n_results=3
-        )
-        context = "\n".join(results['documents'][0]) if results['documents'] else ""
-    except:
-        context = ""
-    
+    context = search_knowledge_base(user_input)
     await asyncio.sleep(0.5)
     
     # ステップ 3: LLM で回答生成
@@ -167,35 +166,43 @@ async def process_user_message(message: dict) -> dict:
         'message': '回答生成中...'
     })
     
-    try:
-        prompt = f"""
-        あなたはユーザーの個人用 AI パートナーです。
-        ユーザーの過去データを踏まえて、実用的で具体的なアドバイスをしてください。
-        
-        ユーザーのデータ：
-        {context}
-        
-        ユーザーの質問：{user_input}
-        
-        回答：
-        """
-        
-        response_text = llm(prompt)
-    except Exception as e:
-        logger.error(f"LLM エラー: {e}")
-        response_text = "申し訳ありません。エラーが発生しました。"
+    prompt = f"""あなたはユーザーの個人用 AI パートナーです。
+ユーザーの過去データを踏まえて、実用的で具体的なアドバイスをしてください。
+
+ユーザーのデータ：
+{context}
+
+ユーザーの質問：{user_input}
+
+回答："""
+    
+    response_text = call_ollama(prompt)
     
     await asyncio.sleep(0.5)
     
-    # 会話を Chromadb に保存（学習）
+    # 会話をファイルに保存
     try:
-        collection.add(
-            ids=[f"conversation_{datetime.now().timestamp()}"],
-            documents=[f"質問: {user_input}\n回答: {response_text}"],
-            metadatas=[{"type": "conversation"}]
-        )
+        conversation = {
+            'type': 'conversation',
+            'timestamp': datetime.now().isoformat(),
+            'user_input': user_input,
+            'ai_response': response_text
+        }
+        
+        # conversations.json に追加
+        try:
+            with open('./data/conversations.json', 'r', encoding='utf-8') as f:
+                conversations = json.load(f)
+        except:
+            conversations = {'conversations': []}
+        
+        conversations['conversations'].append(conversation)
+        
+        with open('./data/conversations.json', 'w', encoding='utf-8') as f:
+            json.dump(conversations, f, indent=2, ensure_ascii=False)
+    
     except Exception as e:
-        logger.error(f"DB 保存エラー: {e}")
+        logger.error(f"会話保存エラー: {e}")
     
     # レスポンス作成
     return {
@@ -206,122 +213,31 @@ async def process_user_message(message: dict) -> dict:
     }
 
 # ────────────────────────────────────────
-# トリガーエンジン
+# WebSocket エンドポイント
 # ────────────────────────────────────────
 
-async def send_trigger_message(trigger_type: str, content: str, metadata: dict = None):
-    """トリガーメッセージをクライアントに送信"""
-    message = {
-        'type': 'trigger',
-        'trigger_type': trigger_type,
-        'content': content,
-        'timestamp': datetime.now().isoformat(),
-        'metadata': metadata or {}
-    }
-    await manager.broadcast(message)
-    logger.info(f"[TRIGGER] {trigger_type}: {content}")
-
-# 【トリガー 1】毎日朝 8:00
-async def morning_greeting():
-    """朝のあいさつ"""
-    content = "おはようございます！今日の体調はどうですか？"
-    await send_trigger_message('morning', content)
-
-# 【トリガー 2】最後の相談から 3 日経った
-async def long_silence_trigger():
-    """長時間相談がない"""
-    # TODO: 最後の相談時刻を管理
-    content = "最近相談がないですね。何か困ってることはありませんか？"
-    await send_trigger_message('silence', content)
-
-# 【トリガー 3】毎週月曜（支出確認）
-async def weekly_summary():
-    """週間サマリー"""
-    content = "今週の支出、確認しましたか？食費が多めですね。"
-    await send_trigger_message('weekly', content)
-
-# 【トリガー 4】Amazon メール受信を監視
-async def monitor_purchases():
-    """購入トリガー（実装例）"""
-    # TODO: Gmail API で Amazon メールを監視
-    # 新しい購入があったら：
-    # await send_trigger_message('purchase', 'メッセージ', {'product': '商品名'})
-    pass
-
-# 【トリガー 5】データ異常検知
-async def detect_anomalies():
-    """データパターン異常検知"""
-    # TODO: Chromadb から過去データを分析
-    # 異常があったら：
-    # await send_trigger_message('alert', 'メッセージ')
-    pass
-
-# ────────────────────────────────────────
-# スケジューラー設定
-# ────────────────────────────────────────
-
-def setup_scheduler():
-    """スケジューラーをセットアップ"""
+@app.websocket("/ws")
+async def websocket_endpoint(websocket: WebSocket):
+    """WebSocket エンドポイント"""
+    await manager.connect(websocket)
     
-    # 時間ベースのトリガー
-    scheduler.add_job(
-        morning_greeting,
-        'cron',
-        hour=8,
-        minute=0,
-        name='morning_greeting'
-    )
+    try:
+        while True:
+            # クライアントからのメッセージ受信
+            data = await websocket.receive_text()
+            message = json.loads(data)
+            logger.info(f"受信: {message}")
+            
+            # メッセージ処理
+            response = await process_user_message(message)
+            
+            # クライアントに返答
+            await manager.send_to_specific(websocket, response)
     
-    scheduler.add_job(
-        weekly_summary,
-        'cron',
-        day_of_week='mon',
-        hour=9,
-        minute=0,
-        name='weekly_summary'
-    )
-    
-    # 定期実行のトリガー
-    scheduler.add_job(
-        long_silence_trigger,
-        'interval',
-        minutes=30,
-        name='long_silence_check'
-    )
-    
-    scheduler.add_job(
-        monitor_purchases,
-        'interval',
-        minutes=5,
-        name='purchase_monitor'
-    )
-    
-    scheduler.add_job(
-        detect_anomalies,
-        'interval',
-        hours=1,
-        name='anomaly_detection'
-    )
-    
-    logger.info("スケジューラーセットアップ完了")
-
-# ────────────────────────────────────────
-# アプリケーション起動
-# ────────────────────────────────────────
-
-@app.on_event("startup")
-async def startup_event():
-    """アプリケーション起動時の処理"""
-    logger.info("サーバー起動...")
-    # スケジューラーは Python 3.14 非対応のため後で実装
-    # setup_scheduler()
-    # scheduler.start()
-
-@app.on_event("shutdown")
-async def shutdown_event():
-    """アプリケーション終了時の処理"""
-    logger.info("サーバー停止...")
-    # scheduler.shutdown()
+    except Exception as e:
+        logger.error(f"WebSocket エラー: {e}")
+    finally:
+        manager.disconnect(websocket)
 
 # ────────────────────────────────────────
 # ヘルスチェック
