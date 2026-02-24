@@ -82,16 +82,23 @@ def call_ollama(prompt: str) -> str:
             ['ollama', 'run', 'mistral', prompt],
             capture_output=True,
             text=True,
-            timeout=30
+            encoding='utf-8',
+            errors='replace',  # エラー文字を置換
+            timeout=60
         )
         
-        if result.returncode == 0:
-            return result.stdout.strip()
-        else:
-            logger.error(f"Ollama エラー: {result.stderr}")
-            return "申し訳ありません。AI エンジンに問題が発生しました。"
+        if result.returncode == 0 and result.stdout:
+            response = result.stdout.strip()
+            if response:
+                return response
+        
+        if result.stderr:
+            logger.warning(f"Ollama 警告: {result.stderr}")
+        
+        return "申し訳ありません。AI エンジンが応答を返しませんでした。"
     
     except subprocess.TimeoutExpired:
+        logger.warning("Ollama タイムアウト")
         return "申し訳ありません。応答がタイムアウトしました。"
     except Exception as e:
         logger.error(f"Ollama 呼び出しエラー: {e}")
