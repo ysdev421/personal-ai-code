@@ -243,6 +243,12 @@ async def websocket_endpoint(websocket: WebSocket):
 # ヘルスチェック
 # ────────────────────────────────────────
 
+@app.post("/chat")
+async def chat_endpoint(message: dict):
+    """チャットエンドポイント（HTTP POST）"""
+    response = await process_user_message(message)
+    return response
+
 @app.get("/health")
 async def health_check():
     """ヘルスチェック"""
